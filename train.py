@@ -206,9 +206,17 @@ def train(target_mask, model,dataloader, total_steps, total_steps_2,steps_til_su
         loss_mse_o=criterion(model_output[:,target_mask,:],pixels1)
         eval=loss_to_psnr(loss_mse_o.item())
         print("eval_object_psnr:",eval)
-        loss_mse_b=criterion(model_output[:,~target_mask,:],pixels2)
-        eval=loss_to_psnr(loss_mse_b.item())
-        print("eval_background_psnr:",eval)
+        # loss_mse_b=criterion(model_output[:,~target_mask,:],pixels2)
+        # eval=loss_to_psnr(loss_mse_b.item())
+        # print("eval_background_psnr:",eval)
+        # -- No mask! --
+        # Verifica se existe algum pixel de background antes de calcular
+        if (~target_mask).any():
+            loss_mse_b = criterion(model_output[:,~target_mask,:], pixels2)
+            eval_b = loss_to_psnr(loss_mse_b.item())
+            print("eval_background_psnr:", eval_b)
+        else:
+            print("eval_background_psnr: N/A (Imagem inteira é ROI)")
         psnr_eval=loss_to_psnr(loss_mse.item())
         print("********************Evaluation the Image %d-th, after Step %d, BEST PSNR: %0.6f, Print rate %0.6f. *************************" % (img_index,step, psnr_eval,bits_rate_eval.item()))
         
@@ -322,15 +330,19 @@ for num,lambda_rate in enumerate(args.lambda_rate_list):
         img_in, _ = next(iter(dataloader))
         args.patch_h=img_in.shape[2]
         args.patch_w=img_in.shape[3]
-        ifmask = False
-        width, height, target_mask_latet = get_mask_h_w(lossy_path)
-        target_mask_tensor, target_mask = mm(lossy_path)
+
+        # width, height, target_mask_latet = get_mask_h_w(lossy_path)
+        # target_mask_tensor, target_mask = mm(lossy_path)
+
+        # -- No mask! --
+        # Define as dimensões diretamente da imagem
+        width, height = args.patch_w, args.patch_h 
         
+        # Cria uma máscara onde TODOS os pixels são True (1)
+        target_mask = torch.ones((1, 1, height, width), dtype=torch.bool)
+        target_mask_tensor = target_mask.flatten()
+        target_mask_flat = target_mask_tensor # Apenas garantindo o mesmo nome de variável usado depois
         
-        if ifmask:
-            args.all_pix_num = target_mask_tensor.sum()
-        else:
-            args.all_pix_num = args.patch_h*args.patch_w
         args.all_pix_num = args.patch_h*args.patch_w
         args.eval_pix_num = args.patch_h*args.patch_w
         print(args)
