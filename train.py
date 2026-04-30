@@ -17,7 +17,6 @@ from torch import nn
 from models.model import Masked_INR
 
 from utils.eval_model import eval_model
-import cv2
 from lossy_contour_algorithm import get_border_bits
 
 manual_seed=1
@@ -57,28 +56,6 @@ def make_path(path):
 
 def loss_to_psnr(loss, max=1):
   return 10*np.log10(max**2/np.asarray(loss))
-def get_mask_h_w(mask_path):
-    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-    y_indices, x_indices = np.where(mask == 255)
-    target_mask = mask == 255
-
-    if len(x_indices) > 0 and len(y_indices) > 0:
-        min_x, max_x = x_indices.min(), x_indices.max()
-        min_y, max_y = y_indices.min(), y_indices.max()
-
-        width = max_x - min_x + 1
-        height = max_y - min_y + 1
-        cropped_mask = target_mask[min_y:max_y + 1, min_x:max_x + 1]
-    return width, height, torch.from_numpy(cropped_mask).unsqueeze(0).unsqueeze(0)
-
-def mm(mask_path):
-    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)  # (h, w)
-    target_mask = mask == 255
-    target_mask_flat = target_mask.flatten()
-    target_mask_tensor = torch.from_numpy(target_mask_flat).bool()
-
-    return target_mask_tensor, torch.from_numpy(target_mask).unsqueeze(0).unsqueeze(0)
-
 
 def train(target_mask, model,dataloader, total_steps, total_steps_2,steps_til_summary,img_index,saved_path):
   
