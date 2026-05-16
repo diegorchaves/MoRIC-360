@@ -3,7 +3,7 @@
 import torch
 from torch import nn
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from utils import get_mgrid, loss_to_psnr
+from common_utils import get_mgrid, loss_to_psnr
 
 
 class Trainer:

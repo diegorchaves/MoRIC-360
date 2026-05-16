@@ -7,7 +7,7 @@ import torch
 import numpy as np
 
 from config import get_args
-from utils import seed_everything
+from common_utils import seed_everything
 from data_utils import get_image_paths, load_image, create_mask, get_save_path
 from trainer import Trainer
 from models.candidate_train import train_with_candidates

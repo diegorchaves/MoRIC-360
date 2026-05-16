@@ -137,7 +137,7 @@ def get_save_path(args, image_index):
     Returns:
         str: full path to save the model checkpoint
     """
-    from utils import make_path
+    from common_utils import make_path
     
     folder_path = (f'./saved/modbase_{args.mod_base}/context_{args.context_arm}'
                    f'_arm_mod_{args.dim_arm_mod}')
