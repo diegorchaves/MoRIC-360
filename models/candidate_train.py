@@ -5,6 +5,7 @@ import torch
 import torchvision.utils as vutils
 from torch import nn
 
+from common_utils import ws_mse_loss_flat
 from models.model import Masked_INR
 
 
@@ -100,7 +101,7 @@ def candidate_train(
 ):
     vis_colum = 3
     best_psnr = 0
-    criterion = nn.MSELoss().cuda()
+
     base_params = [p for name, p in model.named_parameters()]
     optim = torch.optim.Adam([{"params": base_params, "lr": args.lr}])
 
@@ -149,7 +150,7 @@ def candidate_train(
             model_output, rate, _ = model(coords)
 
             bits_rate = rate.sum() / (args.all_pix_num)
-            loss_mse = criterion(model_output, pixels)
+            loss_mse = ws_mse_loss_flat(model_output, pixels, height, width)
 
             loss = args.lambda_rate * bits_rate + loss_mse
             losses.append(loss.item())

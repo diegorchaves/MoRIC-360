@@ -89,6 +89,14 @@ def get_args():
         help="Type of mask to use: full (all ones), lossy (lossy regions), lossless (lossless regions), ERP (25, 50, 25)",
     )
 
+    # SWHDC dilations
+    parser.add_argument(
+        "--swhdc_dilations",
+        type=int,
+        nargs="+",
+        default=[1, 2, 3, 4],
+    )
+
     args = parser.parse_args()
 
     # Set defaults based on dataset type

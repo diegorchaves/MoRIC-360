@@ -130,18 +130,27 @@ class SynthesisLayer(nn.Module):
         output_ft: int,
         kernel_size: int,
         non_linearity: nn.Module = nn.Identity(),
+        custom_conv=None,
     ):
-
         super().__init__()
 
-        self.pad = nn.ReplicationPad2d(int((kernel_size - 1) / 2))
-        self.conv_layer = nn.Conv2d(input_ft, output_ft, kernel_size)
+        if custom_conv is not None:
+            self.pad = nn.Identity()
+            self.conv_layer = custom_conv
+            # peso está encapsulado em custom_conv.conv
+            with torch.no_grad():
+                self.conv_layer.conv.weight.data = (
+                    self.conv_layer.conv.weight.data / output_ft**2
+                )
+                self.conv_layer.conv.bias.data = self.conv_layer.conv.bias.data * 0.0
+        else:
+            self.pad = nn.ReplicationPad2d(int((kernel_size - 1) / 2))
+            self.conv_layer = nn.Conv2d(input_ft, output_ft, kernel_size)
+            with torch.no_grad():
+                self.conv_layer.weight.data = self.conv_layer.weight.data / output_ft**2
+                self.conv_layer.bias.data = self.conv_layer.bias.data * 0.0
 
         self.non_linearity = non_linearity
-
-        with torch.no_grad():
-            self.conv_layer.weight.data = self.conv_layer.weight.data / output_ft**2
-            self.conv_layer.bias.data = self.conv_layer.bias.data * 0.0
 
     def forward(self, x: Tensor) -> Tensor:
         return self.non_linearity(self.conv_layer(self.pad(x)))
@@ -214,7 +223,127 @@ class ModConv(nn.Module):
 
 # === Implementar aqui a SWHDC ===
 class SWHDC(nn.Module):
-    pass
+    def __init__(self, in_channels, out_channels, kernel_size, dilations):
+        super(SWHDC, self).__init__()
+        self.dilations = dilations
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+
+        self.conv = nn.Conv2d(
+            in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1
+        )
+
+    # def forward(self, x):
+    #     _, _, h, w = x.shape
+    #     N = len(self.dilations)
+    #     phi = (torch.linspace(0, 1, h, device=x.device)) * torch.pi
+    #     Rs = torch.min(
+    #         torch.tensor(N, device=x.device, dtype=torch.float32),
+    #         torch.abs(torch.ones(1, device=x.device) /
+    #                  torch.sin(phi - torch.finfo(torch.float32).eps))
+    #     )
+
+    #     row_wise_weights = torch.ones(N, h, device=x.device)
+    #     for idx1 in range(N):
+    #         n = self.dilations[idx1]
+    #         for idx2 in range(len(Rs)):
+    #             R = Rs[idx2]
+    #             cR = torch.ceil(R)
+    #             fR = torch.floor(R)
+    #             if n == R:
+    #                 row_wise_weights[idx1, idx2] = 1
+    #             elif n == fR:
+    #                 row_wise_weights[idx1, idx2] = cR - R
+    #             elif n == cR:
+    #                 row_wise_weights[idx1, idx2] = R - fR
+    #             else:
+    #                 row_wise_weights[idx1, idx2] = 0
+
+    #     outputs = []
+    #     for idx in range(N):
+    #         dilation_rate = self.dilations[idx]
+    #         v_padding_dilation = 1 * (self.conv.kernel_size[0] - 1) // 2
+    #         h_padding_dilation = dilation_rate * (self.conv.kernel_size[0] - 1) // 2
+    #         h_padding_tuple = (h_padding_dilation, h_padding_dilation, 0, 0)
+    #         v_padding_tuple = (0, 0, v_padding_dilation, v_padding_dilation)
+
+    #         x2 = F.pad(x, h_padding_tuple, mode='circular')
+    #         x2 = F.pad(x2, v_padding_tuple, mode='reflect')
+
+    #         out = F.conv2d(x2,
+    #                       weight=self.conv.weight,
+    #                       bias=self.conv.bias,
+    #                       stride=self.conv.stride,
+    #                       padding=0,
+    #                       dilation=(1, dilation_rate),
+    #                       groups=self.conv.groups)
+
+    #         out = torch.einsum('c,abcd->abcd', row_wise_weights[idx], out)
+    #         outputs.append(out)
+
+    # Versão em torch do fwd
+    def forward(self, x):
+        _, _, h, w = x.shape
+        N = len(self.dilations)
+        phi = (torch.linspace(0, 1, h, device=x.device)) * torch.pi
+        Rs = torch.min(
+            torch.tensor(N, device=x.device, dtype=torch.float32),
+            torch.abs(
+                torch.ones(1, device=x.device)
+                / torch.sin(phi - torch.finfo(torch.float32).eps)
+            ),
+        )
+
+        # Vetorização
+        dilations_tensor = torch.tensor(
+            self.dilations, device=x.device, dtype=torch.float32
+        ).view(N, 1)  # [N, 1]
+        Rs_expanded = Rs.unsqueeze(0)  # [1, h]
+
+        cR = torch.ceil(Rs_expanded)
+        fR = torch.floor(Rs_expanded)
+
+        # Criar máscaras para cada condição
+        mask_exact = dilations_tensor == Rs_expanded
+        mask_floor = (dilations_tensor == fR) & ~mask_exact
+        mask_ceil = (dilations_tensor == cR) & ~mask_exact & ~mask_floor
+
+        # Calcular weights usando máscaras
+        row_wise_weights = torch.zeros(N, h, device=x.device)
+        row_wise_weights = torch.where(
+            mask_exact, torch.ones_like(row_wise_weights), row_wise_weights
+        )
+        row_wise_weights = torch.where(mask_floor, cR - Rs_expanded, row_wise_weights)
+        row_wise_weights = torch.where(mask_ceil, Rs_expanded - fR, row_wise_weights)
+
+        outputs = []
+        for idx in range(N):
+            dilation_rate = self.dilations[idx]
+            v_padding_dilation = 1 * (self.conv.kernel_size[0] - 1) // 2
+            h_padding_dilation = dilation_rate * (self.conv.kernel_size[0] - 1) // 2
+            h_padding_tuple = (h_padding_dilation, h_padding_dilation, 0, 0)
+            v_padding_tuple = (0, 0, v_padding_dilation, v_padding_dilation)
+
+            x2 = F.pad(x, h_padding_tuple, mode="circular")
+            x2 = F.pad(x2, v_padding_tuple, mode="reflect")
+
+            out = F.conv2d(
+                x2,
+                weight=self.conv.weight,
+                bias=self.conv.bias,
+                stride=self.conv.stride,
+                padding=0,
+                dilation=(1, dilation_rate),
+                groups=self.conv.groups,
+            )
+
+            out = torch.einsum("c,abcd->abcd", row_wise_weights[idx], out)
+            outputs.append(out)
+
+        # Soma as contribuições de cada dilatação mantendo todas as dimensões
+        outputs = torch.stack(outputs, dim=0)  # [N, B, C, H, W]
+        return torch.sum(outputs, dim=0)  # [B, C, H, W]
 
 
 class LocallyConnectedBlock(nn.Module):
@@ -225,57 +354,45 @@ class LocallyConnectedBlock(nn.Module):
         local_hid_channels,
         out_channels,
         mod_layer,
+        dilations=[1, 2, 4],  # parâmetro novo, com default razoável
     ):
-        # === Instanciar aqui a SWHDC para a net (objeto) e global_net (fundo)
         super().__init__()
-        self.net = []
-        self.net.append(
-            nn.Sequential(SynthesisLayer(2, local_hid_channels, 1, nn.GELU()))
+
+        # --- ramo net (objeto / equador) ---
+        self.net = nn.Sequential(
+            SynthesisLayer(
+                2,
+                local_hid_channels,
+                3,
+                nn.GELU(),
+                custom_conv=SWHDC(2, local_hid_channels, 3, dilations),
+            ),
+            SynthesisResidualLayer(
+                local_hid_channels, local_hid_channels, 1, nn.GELU()
+            ),
+            SynthesisResidualLayer(
+                local_hid_channels, local_hid_channels, 1, nn.GELU()
+            ),
+            SynthesisResidualLayer(local_hid_channels, 3, 1),
         )
-        self.net.append(
-            nn.Sequential(
-                SynthesisResidualLayer(
-                    local_hid_channels, local_hid_channels, 1, nn.GELU()
-                )
-            )
+
+        # --- ramo global_net (fundo / polos) ---
+        self.global_net = nn.Sequential(
+            SynthesisLayer(
+                2,
+                local_hid_channels,
+                3,
+                nn.GELU(),
+                custom_conv=SWHDC(2, local_hid_channels, 3, dilations),
+            ),
+            SynthesisResidualLayer(
+                local_hid_channels, local_hid_channels, 1, nn.GELU()
+            ),
+            SynthesisResidualLayer(
+                local_hid_channels, local_hid_channels, 1, nn.GELU()
+            ),
+            SynthesisResidualLayer(local_hid_channels, 3, 1),
         )
-        self.net.append(
-            nn.Sequential(
-                SynthesisResidualLayer(
-                    local_hid_channels, local_hid_channels, 1, nn.GELU()
-                )
-            )
-        )
-        self.net.append(nn.Sequential(SynthesisResidualLayer(local_hid_channels, 3, 1)))
-
-        self.net = nn.Sequential(*self.net)
-
-        self.global_net = []
-        self.global_net.append(SynthesisLayer(2, local_hid_channels, 1, nn.GELU()))
-        self.global_net.append(
-            SynthesisResidualLayer(local_hid_channels, local_hid_channels, 1, nn.GELU())
-        )
-        self.global_net.append(
-            SynthesisResidualLayer(local_hid_channels, local_hid_channels, 1, nn.GELU())
-        )
-        self.global_net.append(SynthesisResidualLayer(local_hid_channels, 3, 1))
-
-        self.global_net = nn.Sequential(*self.global_net)
-
-    def get_param(self) -> OrderedDict[str, Tensor]:
-
-        return OrderedDict({k: v.detach().clone() for k, v in self.named_parameters()})
-
-    def set_param(self, param: OrderedDict[str, Tensor]) -> None:
-
-        self.load_state_dict(param)
-
-    def forward(self, x, y):
-
-        output_local = self.net(x)
-        output_global = self.global_net(y)
-
-        return output_local, output_global
 
 
 class LocalGlobalBlock(LocallyConnectedBlock):
@@ -287,6 +404,7 @@ class LocalGlobalBlock(LocallyConnectedBlock):
         out_channels,
         mod_layer,
         mask,
+        dilations=[1, 2, 3, 4],
     ):
         super().__init__(
             in_channels,
@@ -294,6 +412,7 @@ class LocalGlobalBlock(LocallyConnectedBlock):
             local_hid_channels,
             out_channels,
             mod_layer,
+            dilations=dilations,
         )
 
         self.mask = mask
@@ -476,6 +595,7 @@ class Masked_INR(nn.Module):
             out_channels=hidden_layers + 1,
             mod_layer=args.mod_hid_layer,
             mask=self.target_mask,
+            dilations=args.swhdc_dilations,
         )
 
         self.modules_to_send = ["arm", "conv_mod", "upsampling_2d"]

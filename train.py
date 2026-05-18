@@ -79,7 +79,7 @@ def train_single_image(args, image_index, trainer):
     trainer.model = model
 
     # Stage 1 training
-    total_steps = 100000
+    total_steps = 10000
     steps_til_summary = 10
 
     psnr_s1, checkpoint_s1 = trainer.train_stage_1(
@@ -90,7 +90,7 @@ def train_single_image(args, image_index, trainer):
     )
 
     # Stage 2 training
-    total_steps_2 = 10000
+    total_steps_2 = 2000
     psnr_s2, checkpoint_s2 = trainer.train_stage_2(
         target_mask_flat,
         dataloader,

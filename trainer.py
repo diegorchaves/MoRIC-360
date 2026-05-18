@@ -1,10 +1,11 @@
 """Training logic for both stages of the training pipeline."""
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
-from common_utils import get_mgrid, loss_to_psnr
+from common_utils import get_mgrid, loss_to_psnr, ws_mse_loss_flat
 
 
 class Trainer:
@@ -22,7 +23,6 @@ class Trainer:
         self.model = model
         self.args = args
         self.device = device
-        self.criterion = nn.MSELoss().to(device)
 
     def train_stage_1(
         self, target_mask, dataloader, total_steps=100000, steps_til_summary=10
@@ -90,7 +90,7 @@ class Trainer:
             # Forward pass
             model_output, rate, _ = self.model(coords)
             bits_rate = rate.sum() / self.args.all_pix_num
-            loss_mse = self.criterion(model_output, pixels)
+            loss_mse = ws_mse_loss_flat(model_output, pixels, height, width)
             loss = self.args.lambda_rate * bits_rate + loss_mse
             losses.append(loss.item())
 
@@ -153,7 +153,7 @@ class Trainer:
             [p for p in self.model.parameters() if p.requires_grad], lr=1e-4
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min", factor=0.8, patience=20, verbose=True
+            optimizer, mode="min", factor=0.8, patience=20
         )
 
         # Get pixel data
@@ -181,7 +181,7 @@ class Trainer:
             # Forward pass
             model_output, rate, _ = self.model(coords)
             bits_rate = rate.sum() / self.args.all_pix_num
-            loss_mse = self.criterion(model_output, pixels)
+            loss_mse = ws_mse_loss_flat(model_output, pixels, height, width)
             loss_2 = self.args.lambda_rate * bits_rate + loss_mse
             losses_2.append(loss_2.item())
 
@@ -243,24 +243,31 @@ class Trainer:
         with torch.no_grad():
             model_output, rate, _ = self.model(coords)
             bits_rate_eval = rate.sum() / self.args.all_pix_num
-            bits_rate_eval_num = rate.sum()
-            loss_mse = self.criterion(model_output, pixels)
 
-            # ROI evaluation
-            pixels_roi = pixels[:, target_mask, :]
-            output_roi = model_output[:, target_mask, :]
-            loss_mse_roi = self.criterion(output_roi, pixels_roi)
-            psnr_roi = loss_to_psnr(loss_mse_roi.item())
-
+            # loss global — reshape para (B, 3, H, W) internamente
+            loss_mse = ws_mse_loss_flat(model_output, pixels, height, width)
             psnr_eval = loss_to_psnr(loss_mse.item())
 
+            # para ROI e background, trabalha no espaço 2D antes de filtrar
+            pred_2d = model_output.permute(0, 2, 1).view(-1, 3, height, width)
+            target_2d = pixels.permute(0, 2, 1).view(-1, 3, height, width)
+
+            # máscara no formato 2D: (H*W,) → (H, W)
+            mask_2d = target_mask.view(height, width)
+
+            pred_roi = pred_2d[:, :, mask_2d]  # (B, 3, N_roi)
+            target_roi = target_2d[:, :, mask_2d]
+
+            # aqui já não temos estrutura espacial, então MSE simples é o correto
+            # (os pesos por latitude não fazem sentido em pontos sem posição espacial)
+            loss_mse_roi = F.mse_loss(pred_roi, target_roi)
+            psnr_roi = loss_to_psnr(loss_mse_roi.item())
             print(f"eval_object_psnr: {psnr_roi:.6f}")
 
-            # Background evaluation (if it exists)
-            if (~target_mask).any():
-                pixels_bg = pixels[:, ~target_mask, :]
-                output_bg = model_output[:, ~target_mask, :]
-                loss_mse_bg = self.criterion(output_bg, pixels_bg)
+            if (~mask_2d).any():
+                pred_bg = pred_2d[:, :, ~mask_2d]
+                target_bg = target_2d[:, :, ~mask_2d]
+                loss_mse_bg = F.mse_loss(pred_bg, target_bg)
                 psnr_bg = loss_to_psnr(loss_mse_bg.item())
                 print(f"eval_background_psnr: {psnr_bg:.6f}")
             else:
