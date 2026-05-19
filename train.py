@@ -395,6 +395,8 @@ def train(
             image_name=image_name,
             lambda_rate=args.lambda_rate,
             step="eval",
+            suffix=args.mask_type,
+            pos_suffix=args.use_swhdc,
         )
         # ─────────────────────────────────────────────────────────────────
 
@@ -462,6 +464,10 @@ parser.add_argument(
     "--run_tag", type=str, default="", help="Tag livre para identificar o experimento"
 )
 # ─────────────────────────────────────────────────────────────────────────────
+#
+# --- Args SWHDC --------------------------------------------------------------
+parser.add_argument("--use_swhdc", action="store_true", default=False)
+parser.add_argument("--swhdc_dilations", type=int, nargs="+", default=[1, 2, 3, 4])
 
 args = parser.parse_args()
 
@@ -531,7 +537,6 @@ for num, lambda_rate in enumerate(args.lambda_rate_list):
     args.lambda_rate = lambda_rate
 
     for it in traing_list:
-
         # ── Resolve nome e caminho da imagem ──────────────────────────────
         if generic_image_list is not None:
             # Modo genérico: qualquer pasta de imagens
@@ -544,7 +549,9 @@ for num, lambda_rate in enumerate(args.lambda_rate_list):
                 image_name = f"kodim{idx_str}"
                 image_path = None  # usa val_folder abaixo
                 val_folder = f"./dataset/kodak_data_set/kodim{idx_str}"
-                lossyless_path = f"./dataset/kodak_data_set/kodak_mask/kodim{idx_str}.png"
+                lossyless_path = (
+                    f"./dataset/kodak_data_set/kodak_mask/kodim{idx_str}.png"
+                )
             elif args.type == "clic":
                 image_name = f"clic{idx_str}"
                 image_path = None
@@ -723,6 +730,7 @@ for num, lambda_rate in enumerate(args.lambda_rate_list):
             checkpoint_path=saved_path,
             decoded_image_path=decoded_path,
             metrics={
+                "swhdc": 1 if args.use_swhdc else 0,
                 "psnr": out_psnr,
                 "loss_mse": loss_mse,
                 "mask_type": args.mask_type,

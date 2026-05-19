@@ -8,3 +8,6 @@ implementar mascara erp e testar
 10k 10k 3 lambdas 1 img
 
 loss_to_psnr -> mudar para wsmse para wspsnr
+
+pq nao esta rodando o modo full
+salvar imagem com modo da mascara
