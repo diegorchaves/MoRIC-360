@@ -1,21 +1,29 @@
-import argparse
 import os
 import random
-import sys
 from logging import WARN
 
-import imageio.v2 as imageio
 import numpy as np
 import torch
-from numpy import *
-from scipy import signal
+import torch.nn.functional as F
 from skimage.metrics import peak_signal_noise_ratio as PSNR
 from torch import nn
 
-from train import height
 from utils.quantizemodel import quantize_model
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def weights(H, W, device):
+
+    phis = torch.arange(H + 1, device=device) * torch.pi / H
+    deltaTheta = 2 * torch.pi / W
+
+    column = deltaTheta * (torch.cos(phis[:-1]) - torch.cos(phis[1:]))  # Shape: (H,)
+
+    # Modifica o shape para (1, H, 1, 1) para que o PyTorch faça o broadcast automático para (B, H, W, C)
+    w = column.view(1, H, 1, 1)
+
+    return w
 
 
 # === Implementar o eval do WS-PSNR e WS-SSIM ===
@@ -31,15 +39,7 @@ def ws_mse(img1, img2, H, W):
     img1_2d = img1.view(B, H, W, C)
     img2_2d = img2.view(B, H, W, C)
 
-    # 2. Calcula os pesos baseados na latitude (H) usando PyTorch
-    phis = torch.arange(H + 1, device=device) * torch.pi / H
-    deltaTheta = 2 * torch.pi / W
-
-    # Versão vetorizada e otimizada do seu list comprehension original
-    column = deltaTheta * (torch.cos(phis[:-1]) - torch.cos(phis[1:]))  # Shape: (H,)
-
-    # Modifica o shape para (1, H, 1, 1) para que o PyTorch faça o broadcast automático para (B, H, W, C)
-    w = column.view(1, H, 1, 1)
+    w = weights(H, W, device)
 
     # 3. Calcula o erro quadrado ponderado pelos pesos esféricos
     error = ((img1_2d - img2_2d) ** 2) * w
@@ -54,23 +54,78 @@ def ws_mse(img1, img2, H, W):
     return torch.mean(wsmse)
 
 
-def ws_psnr(img1, img2, max=1.0):
-    wsmse = ws_mse(img1, img2)
-    return 10 * log10(max**2 / wsmse)
+def ws_psnr(img1, img2, H, W, max=1.0):
+    """
+    Calcula o WS-PSNR utilizando o WS-MSE em PyTorch.
+    """
+    wsmse = ws_mse(img1, img2, H, W)
+    # Evita divisão por zero caso as imagens sejam idênticas
+    if wsmse == 0:
+        return torch.tensor(float("inf"), device=img1.device)
+    return 10 * torch.log10(max**2 / wsmse)
 
 
-def ws_ssim(img1, img2):
-    """Calcula WSSSIM lidando com canais RGB/RGBA de forma segura."""
-    # n_channels = img1.shape[2]
-    n_channels = 3  # RGB
-    if n_channels > 3:
-        n_channels = 3
-    wssim_channels = []
-    for i in range(n_channels):
-        c1 = img1[:, :, i]
-        c2 = img2[:, :, i]
-        wssim_channels.append(WSSSIM(c1, c2))
-    return np.mean(wssim_channels)
+def ws_ssim(img1, img2, H, W, K1=0.01, K2=0.03, L=1.0):
+    """
+    Calcula o Weighted Spherical SSIM (WS-SSIM) totalmente otimizado em PyTorch.
+    Suporta tensores no formato (batch_size, H * W, C) vindos da GPU.
+    """
+    B, _, C = img1.shape
+    device = img1.device
+
+    # 1. Redimensiona de (B, H*W, C) para o formato padrão do PyTorch (B, C, H, W)
+    img1_2d = img1.view(B, H, W, C).permute(0, 3, 1, 2)
+    img2_2d = img2.view(B, H, W, C).permute(0, 3, 1, 2)
+
+    # 2. Configuração do Filtro Gaussiano (11x11, sigma=1.5)
+    k = 11
+    sigma = 1.5
+    pad = k // 2
+
+    # Cria a janela gaussiana diretamente no dispositivo (GPU)
+    coords = torch.arange(k, dtype=torch.float32, device=device) - pad
+    grid_x, grid_y = torch.meshgrid(coords, coords, indexing="ij")
+    window = torch.exp(-(grid_x**2 + grid_y**2) / (2.0 * sigma**2))
+    window = (window / window.sum()).view(1, 1, k, k).expand(C, 1, k, k)
+
+    # 3. Otimização dos Pesos Esféricos Válidos
+    # A convolução 'valid' remove as bordas (pad). Conseguimos o mesmo efeito fatiando o peso original.
+    w_base = weights(H, W, device)  # Shape: (1, H, 1, 1)
+    W_2d = w_base.view(H, 1).expand(H, W)
+    Wi = W_2d[
+        pad:-pad, pad:-pad
+    ]  # Recorta as bordas para alinhar com o resultado da convolução
+    weight_sum = Wi.sum()
+
+    C1 = (K1 * L) ** 2
+    C2 = (K2 * L) ** 2
+
+    # 4. Convoluções Vetorizadas (groups=C aplica o filtro por canal individualmente para todo o batch)
+    mu1 = F.conv2d(img1_2d, window, groups=C)
+    mu2 = F.conv2d(img2_2d, window, groups=C)
+
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = F.conv2d(img1_2d * img1_2d, window, groups=C) - mu1_sq
+    sigma2_sq = F.conv2d(img2_2d * img2_2d, window, groups=C) - mu2_sq
+    sigma12 = F.conv2d(img1_2d * img2_2d, window, groups=C) - mu1_mu2
+
+    # 5. Cálculo do Mapa SSIM estrutural
+    numerator = (2 * mu1_mu2 + C1) * (2 * sigma12 + C2)
+    denominator = (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+    ssim_map = numerator / denominator
+
+    # 6. Aplicação dos Pesos Esféricos
+    Wi_expanded = Wi.view(1, 1, Wi.shape[0], Wi.shape[1])
+    weighted_ssim = ssim_map * Wi_expanded
+
+    # Média ponderada espacial por canal -> Shape: (B, C)
+    ssim_per_channel = torch.sum(weighted_ssim, dim=(2, 3)) / weight_sum
+
+    # Retorna a média entre canais e entre o lote (batch) como um escalar
+    return torch.mean(ssim_per_channel)
 
 
 manual_seed = 1
@@ -175,8 +230,11 @@ def eval_model(target_mask, args, model, binary_mask, dataloader, img_index):
         # vutils.save_image(img_out,'./eval_'+str(img_index)+'.png',nrow=1)
         torch.cuda.empty_cache()
 
+    ws_ssim_eval = ws_ssim(model_output, pixels, height, width)
+
     return (
         psnr_eval,
+        ws_ssim_eval,
         bits_rate_eval.item(),
         bits_rate_eval_num.item(),
         out_network_rate.item(),

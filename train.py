@@ -21,7 +21,7 @@ from models.model import Masked_INR
 
 # ── Logger ──────────────────────────────────────────────────────────────────
 from results_logger import ResultsLogger
-from utils.eval_model import eval_model, ws_mse
+from utils.eval_model import eval_model, ws_mse, ws_psnr
 
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -65,10 +65,6 @@ def make_path(path):
 
 def loss_to_psnr(loss, max=1):
     return 10 * np.log10(max**2 / np.asarray(loss))
-
-
-def ws_mse_to_wspsnr(wsmse, max=1):
-    return 10 * log10(max**2 / wsmse)
 
 
 def get_mask_h_w(mask_path):
@@ -162,14 +158,14 @@ def train(
 
             model_output, rate, _ = model(coords)
             bits_rate = rate.sum() / (args.all_pix_num)
-            loss_mse = criterion(model_output, pixels)
-            # loss_mse = ws_mse(model_output, pixels, height, width)
+            # loss_mse = criterion(model_output, pixels)
+            loss_mse = ws_mse(model_output, pixels, height, width)
             loss = args.lambda_rate * bits_rate + loss_mse
             losses.append(loss.item())
 
             if not step % steps_til_summary or (step == total_steps - 1):
-                psnr_this_iter = loss_to_psnr(loss_mse.item())
-
+                # psnr_this_iter = loss_to_psnr(loss_mse.item())
+                psnr_this_iter = ws_psnr(model_output, pixels, height, width)
                 if (loss < best_rd) and (step > 0):
                     best_rd = loss
                     checkpoint = {
@@ -231,13 +227,14 @@ def train(
 
             model_output, rate, _ = model(coords)
             bits_rate = rate.sum() / (args.all_pix_num)
-            loss_mse = criterion(model_output, pixels)
-            # loss_mse = ws_mse(model_output, pixels, height, width)
+            # loss_mse = criterion(model_output, pixels)
+            loss_mse = ws_mse(model_output, pixels, height, width)
             loss_2 = args.lambda_rate * bits_rate + loss_mse
             losses_2.append(loss_2.item())
 
             if not step % steps_til_summary or (step == total_steps_2 - 1):
-                psnr_this_iter = loss_to_psnr(loss_mse.item())
+                # psnr_this_iter = loss_to_psnr(loss_mse.item())
+                psnr_this_iter = ws_psnr(model_output, pixels, height, width)
                 if (loss_2 < best_rd_2) and (step > 0):
                     best_rd_2 = loss_2
                     checkpoint = {
@@ -289,15 +286,19 @@ def train(
         model_output, rate, binary_mask = model(coords)
         bits_rate_eval = rate.sum() / (args.all_pix_num)
         bits_rate_eval_num = rate.sum()
-        loss_mse = criterion(model_output, pixels)
-        # loss_mse = ws_mse(model_output, pixels, height, width)
+        # loss_mse = criterion(model_output, pixels)
+        loss_mse = ws_mse(model_output, pixels, height, width)
         loss_mse_o = criterion(model_output[:, target_mask, :], pixels1)
         # loss_mse_o = ws_mse(model_output[:, target_mask, :], pixels1, height, width)
         loss_mse_b = criterion(model_output[:, ~target_mask, :], pixels2)
         # loss_mse_b = ws_mse(model_output[:, ~target_mask, :], pixels2, height, width)
-        psnr_eval = loss_to_psnr(loss_mse.item())
+        psnr_eval = ws_psnr(model_output, pixels, height, width)
 
         psnr_object = loss_to_psnr(loss_mse_o.item())
+        # psnr_object = ws_psnr(model_output[:, target_mask, :], pixels1, height, width)
+        # psnr_background = ws_psnr(
+        #    model_output[:, ~target_mask, :], pixels2, height, width
+        # )
         psnr_background = loss_to_psnr(loss_mse_b.item())
 
         print("eval_object_psnr:", psnr_object)
@@ -480,8 +481,8 @@ for num, lambda_rate in enumerate(args.lambda_rate_list):
         )
 
         # Define total steps
-        total_steps = 100
-        total_steps_2 = 100
+        total_steps = 10
+        total_steps_2 = 10
         steps_til_summary = 10
 
         target_mask_flat = target_mask.flatten()
@@ -531,6 +532,7 @@ for num, lambda_rate in enumerate(args.lambda_rate_list):
 
         (
             eval_out_psnr,
+            eval_ws_ssim,
             eval_y_rate,
             eval_y_rate_num,
             eval_network_rate,
@@ -589,6 +591,9 @@ for num, lambda_rate in enumerate(args.lambda_rate_list):
                 "bits_rate": out_rate,
                 "bits_rate_num": rate_num,
                 "eval_psnr": eval_out_psnr,
+                "eval_ws_ssim": eval_ws_ssim.item()
+                if torch.is_tensor(eval_ws_ssim)
+                else eval_ws_ssim,  # <--- ADICIONE AQUI
                 "eval_y_rate": eval_y_rate,
                 "eval_y_rate_num": eval_y_rate_num,
                 "eval_network_rate": eval_network_rate,
