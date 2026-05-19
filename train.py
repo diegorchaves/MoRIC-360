@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as transforms
-from torch import nn
+from torch import Tensor, nn
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchvision import datasets, transforms
 
@@ -86,6 +86,42 @@ def mm(mask_path):
     target_mask_flat = target_mask.flatten()
     target_mask_tensor = torch.from_numpy(target_mask_flat).bool()
     return target_mask_tensor, torch.from_numpy(target_mask).unsqueeze(0).unsqueeze(0)
+
+
+def create_mask(height, width, mask_type="full"):
+    """
+    Create a mask tensor based on the mask type.
+
+    Args:
+        height: image height
+        width: image width
+        mask_type: type of mask
+            'full' - all pixels True (no masking effect)
+            'erp'  - equatorial 50% True, polar 25% north + 25% south False
+
+    Returns:
+        tuple: (target_mask_2d, target_mask_flat)
+            target_mask_2d  : BoolTensor shape (1, 1, H, W)
+            target_mask_flat: BoolTensor shape (H*W,)
+    """
+    if mask_type == "full":
+        # All pixels are foreground
+        target_mask = torch.ones((1, 1, height, width), dtype=torch.bool)
+    elif mask_type == "erp":
+        # Polar regions (top 25% and bottom 25%) are background (False)
+        # Equatorial region (middle 50%) is foreground (True)
+        target_mask = torch.zeros(1, 1, height, width, dtype=torch.bool)
+        top = int(height * 0.25)
+        bottom = int(height * 0.75)
+        target_mask[:, :, top:bottom, :] = True
+    else:
+        raise ValueError(
+            f"Unknown mask_type: '{mask_type}'. Choose from 'full' or 'erp'."
+        )
+
+    # Flatten to 1D for pixel-indexed indexing used throughout training
+    target_mask_flat = target_mask.view(-1)
+    return target_mask, target_mask_flat
 
 
 def train(
@@ -351,6 +387,18 @@ parser.add_argument("--scale", type=int, default=1)
 parser.add_argument("--lambda_rate", type=float, default=1e-3)
 parser.add_argument("--lambda_rate_list", type=float, nargs="+", default=[1e-3])
 parser.add_argument("--start_index", type=int, default=0)
+parser.add_argument(
+    "--mask_type",
+    type=str,
+    default="full",
+    choices=["full", "erp"],
+    help=(
+        "Tipo de máscara a usar durante o treino. "
+        "'full': todos os pixels (sem mascaramento). "
+        "'erp': polo norte (25%%) e polo sul (25%%) são background; "
+        "equador (50%% central) é foreground."
+    ),
+)
 # ── Novos args do logger ──────────────────────────────────────────────────────
 parser.add_argument(
     "--results_dir",
@@ -446,9 +494,15 @@ for num, lambda_rate in enumerate(args.lambda_rate_list):
         args.patch_h = img_in.shape[2]
         args.patch_w = img_in.shape[3]
 
-        ifmask = False
-        width, height, target_mask_latet = get_mask_h_w(lossy_path)
-        target_mask_tensor, target_mask = mm(lossy_path)
+        # ── Cria máscara de acordo com --mask_type ────────────────────────
+        target_mask, target_mask_tensor = create_mask(
+            height=args.patch_h,
+            width=args.patch_w,
+            mask_type=args.mask_type,
+        )
+        # target_mask       : (1, 1, H, W) BoolTensor
+        # target_mask_tensor: (H*W,)       BoolTensor  (flat)
+        # ─────────────────────────────────────────────────────────────────
 
         args.all_pix_num = args.patch_h * args.patch_w
         args.eval_pix_num = args.patch_h * args.patch_w
@@ -588,6 +642,7 @@ for num, lambda_rate in enumerate(args.lambda_rate_list):
             metrics={
                 "psnr": out_psnr,
                 "loss_mse": loss_mse,
+                "mask_type": args.mask_type,
                 "bits_rate": out_rate,
                 "bits_rate_num": rate_num,
                 "eval_psnr": eval_out_psnr,
@@ -650,9 +705,6 @@ for num, lambda_rate in enumerate(args.lambda_rate_list):
     eval_all_conv_rate_num_list_of_lists.append(eval_all_rate_conv_num)
 
     print("....... Complete all dataset training ......")
-    print(
-        "Ave Training PSNR:", np.mean(all_psnr), "Ave Training Bits", np.mean(all_rate)
-    )
     print(
         "Evaluation: Ave Eval PSNR:",
         np.mean(eval_all_psnr),
