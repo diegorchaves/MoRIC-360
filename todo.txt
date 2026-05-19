@@ -1,0 +1,10 @@
+sacar fora as metricas?
+
+implementar mascara de uns e testar
+implementar ws_mse
+implementar swhdc
+implementar mascara erp e testar
+
+10k 10k 3 lambdas 1 img
+
+loss_to_psnr -> mudar para wsmse para wspsnr
