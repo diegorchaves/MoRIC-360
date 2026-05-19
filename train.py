@@ -5,14 +5,17 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import argparse
 import datetime
 import random
+from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as transforms
+from PIL import Image
 from torch import Tensor, nn
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
 
 from lossy_contour_algorithm import get_border_bits
@@ -122,6 +125,46 @@ def create_mask(height, width, mask_type="full"):
     # Flatten to 1D for pixel-indexed indexing used throughout training
     target_mask_flat = target_mask.view(-1)
     return target_mask, target_mask_flat
+
+
+# ── Dataset genérico para imagens avulsas ────────────────────────────────────
+_IMG_EXTENSIONS = {".png", ".jpg", ".jpeg", ".PNG", ".JPG", ".JPEG"}
+
+
+class SingleImageDataset(Dataset):
+    """Dataset que carrega UMA imagem e a expõe como item único (batch-size 1)."""
+
+    def __init__(self, image_path: str, transform=None):
+        self.image_path = image_path
+        self.transform = transform or transforms.ToTensor()
+
+    def __len__(self):
+        return 1
+
+    def __getitem__(self, idx):
+        img = Image.open(self.image_path).convert("RGB")
+        return self.transform(img), 0  # 0 = dummy label
+
+
+def load_images_from_dir(images_dir: str):
+    """
+    Retorna uma lista de (image_name, image_path) para cada imagem
+    .png/.jpg/.jpeg encontrada em `images_dir` (não-recursivo).
+    """
+    base = Path(images_dir)
+    if not base.is_dir():
+        raise ValueError(f"--images_dir '{images_dir}' não é um diretório válido.")
+    entries = sorted(
+        p for p in base.iterdir() if p.is_file() and p.suffix in _IMG_EXTENSIONS
+    )
+    if not entries:
+        raise ValueError(
+            f"Nenhuma imagem .png/.jpg/.jpeg encontrada em '{images_dir}'."
+        )
+    return [(p.stem, str(p)) for p in entries]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def train(
@@ -388,6 +431,15 @@ parser.add_argument("--lambda_rate", type=float, default=1e-3)
 parser.add_argument("--lambda_rate_list", type=float, nargs="+", default=[1e-3])
 parser.add_argument("--start_index", type=int, default=0)
 parser.add_argument(
+    "--images_dir",
+    type=str,
+    default=None,
+    help=(
+        "Caminho para pasta contendo imagens .png/.jpg/.jpeg. "
+        "Quando fornecido, ignora --type e carrega todas as imagens da pasta."
+    ),
+)
+parser.add_argument(
     "--mask_type",
     type=str,
     default="full",
@@ -413,11 +465,23 @@ parser.add_argument(
 
 args = parser.parse_args()
 
-# --- Ajuste de quais imagens vao ser rodadas -----------------------------------
-if args.type == "kodak":
-    traing_list = range(23, 24)
-elif args.type == "clic":
-    traing_list = range(0, 41)
+# --- Monta a lista de imagens a processar ------------------------------------
+# Modo genérico: --images_dir aponta para qualquer pasta de imagens
+# Modo legado  : --type kodak | clic  (mantido para compatibilidade)
+if args.images_dir is not None:
+    # Lista de (image_name, image_path) para o modo genérico
+    generic_image_list = load_images_from_dir(args.images_dir)
+    traing_list = range(len(generic_image_list))
+else:
+    generic_image_list = None  # sinalizador: usar lógica legada
+    if args.type == "kodak":
+        traing_list = range(23, 24)
+    elif args.type == "clic":
+        traing_list = range(0, 41)
+    else:
+        raise ValueError(
+            f"--type '{args.type}' desconhecido. Use 'kodak', 'clic', ou forneça --images_dir."
+        )
 
 # ── Instancia o logger UMA vez para todo o experimento ───────────────────────
 logger = ResultsLogger(
@@ -467,23 +531,38 @@ for num, lambda_rate in enumerate(args.lambda_rate_list):
     args.lambda_rate = lambda_rate
 
     for it in traing_list:
-        idx_str = f"{it + 1:02d}"
 
-        if args.type == "kodak":
-            image_name = f"kodim{idx_str}"
-            val_folder = f"./dataset/kodak_data_set/kodim{idx_str}"
-            lossy_path = f"./dataset/kodak_data_set/kodak_lossy_mask/kodim{idx_str}.png"
-            lossyless_path = f"./dataset/kodak_data_set/kodak_mask/kodim{idx_str}.png"
-        elif args.type == "clic":
-            image_name = f"clic{idx_str}"
-            val_folder = f"./dataset/clic_data_set/clic{idx_str}"
-            lossy_path = f"./dataset/clic_data_set/clic_lossy_mask/clic{idx_str}.png"
-            lossyless_path = f"./dataset/clic_data_set/clic_mask/clic{idx_str}.png"
+        # ── Resolve nome e caminho da imagem ──────────────────────────────
+        if generic_image_list is not None:
+            # Modo genérico: qualquer pasta de imagens
+            image_name, image_path = generic_image_list[it]
+            lossyless_path = None  # sem máscara de borda externa
+        else:
+            # Modo legado: Kodak / CLIC com estrutura de pastas fixa
+            idx_str = f"{it + 1:02d}"
+            if args.type == "kodak":
+                image_name = f"kodim{idx_str}"
+                image_path = None  # usa val_folder abaixo
+                val_folder = f"./dataset/kodak_data_set/kodim{idx_str}"
+                lossyless_path = f"./dataset/kodak_data_set/kodak_mask/kodim{idx_str}.png"
+            elif args.type == "clic":
+                image_name = f"clic{idx_str}"
+                image_path = None
+                val_folder = f"./dataset/clic_data_set/clic{idx_str}"
+                lossyless_path = f"./dataset/clic_data_set/clic_mask/clic{idx_str}.png"
+        # ─────────────────────────────────────────────────────────────────
 
         args.lambda_rate = lambda_rate
         transform_val = transforms.Compose([transforms.ToTensor()])
-        val_dataset = datasets.ImageFolder(val_folder, transform_val)
-        dataloader = torch.utils.data.DataLoader(
+
+        if image_path is not None:
+            # Modo genérico: carrega imagem diretamente do caminho
+            val_dataset = SingleImageDataset(image_path, transform=transform_val)
+        else:
+            # Modo legado: usa ImageFolder (exige subpasta com a imagem)
+            val_dataset = datasets.ImageFolder(val_folder, transform_val)
+
+        dataloader = DataLoader(
             val_dataset,
             batch_size=args.batch_size,
             shuffle=False,
@@ -607,7 +686,11 @@ for num, lambda_rate in enumerate(args.lambda_rate_list):
         eval_all_rate_conv.append(eval_network_rate_conv)
         eval_all_rate_conv_num.append(eval_network_rate_conv_num)
 
-        eval_border_rate_num = get_border_bits(lossyless_path, it)
+        if lossyless_path is not None:
+            eval_border_rate_num = get_border_bits(lossyless_path, it)
+        else:
+            # Sem máscara de borda: contribuição de borda é zero
+            eval_border_rate_num = 0
         eval_border_rate = eval_border_rate_num / args.eval_pix_num
         eval_all_border_rate.append(eval_border_rate)
         eval_all_border_rate_num.append(eval_border_rate_num)
