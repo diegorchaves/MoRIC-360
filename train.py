@@ -1,3 +1,4 @@
+import gc
 import os
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -180,7 +181,8 @@ def train(
     image_name: str,
     args,
 ):
-
+    gc.collect()
+    torch.cuda.empty_cache()
     criterion = nn.MSELoss().cuda()
     base_params = [p for name, p in model.named_parameters()]
 
@@ -237,8 +239,10 @@ def train(
 
             model_output, rate, _ = model(coords)
             bits_rate = rate.sum() / (args.all_pix_num)
-            # loss_mse = criterion(model_output, pixels)
-            loss_mse = ws_mse(model_output, pixels, height, width)
+            if args.loss_type == "mse":
+                loss_mse = criterion(model_output, pixels)
+            elif args.loss_type == "wsmse":
+                loss_mse = ws_mse(model_output, pixels, height, width)
             loss = args.lambda_rate * bits_rate + loss_mse
             losses.append(loss.item())
 
@@ -306,8 +310,10 @@ def train(
 
             model_output, rate, _ = model(coords)
             bits_rate = rate.sum() / (args.all_pix_num)
-            # loss_mse = criterion(model_output, pixels)
-            loss_mse = ws_mse(model_output, pixels, height, width)
+            if args.loss_type == "mse":
+                loss_mse = criterion(model_output, pixels)
+            elif args.loss_type == "wsmse":
+                loss_mse = ws_mse(model_output, pixels, height, width)
             loss_2 = args.lambda_rate * bits_rate + loss_mse
             losses_2.append(loss_2.item())
 
@@ -365,8 +371,10 @@ def train(
         model_output, rate, binary_mask = model(coords)
         bits_rate_eval = rate.sum() / (args.all_pix_num)
         bits_rate_eval_num = rate.sum()
-        # loss_mse = criterion(model_output, pixels)
-        loss_mse = ws_mse(model_output, pixels, height, width)
+        if args.loss_type == "mse":
+            loss_mse = criterion(model_output, pixels)
+        elif args.loss_type == "wsmse":
+            loss_mse = ws_mse(model_output, pixels, height, width)
         loss_mse_o = criterion(model_output[:, target_mask, :], pixels1)
         # loss_mse_o = ws_mse(model_output[:, target_mask, :], pixels1, height, width)
         loss_mse_b = criterion(model_output[:, ~target_mask, :], pixels2)
@@ -404,6 +412,11 @@ def train(
         torch.save(checkpoint, saved_path)
         print("Saved model at", saved_path)
 
+    del pixels, pixels1, pixels2, coords, model_output
+    del checkpoint
+    torch.cuda.empty_cache()
+    gc.collect()
+
     return psnr_eval, bits_rate_eval.item(), bits_rate_eval_num.item(), decoded_path
 
 
@@ -411,6 +424,7 @@ def train(
 global args
 parser = argparse.ArgumentParser(description="PyTorch Example")
 parser.add_argument("--batch_size", type=int, default=1)
+parser.add_argument("--loss_type", type=str, default="mse")
 parser.add_argument("--lr", type=float, default=0.01)
 parser.add_argument("--data", type=str, default="../data")
 parser.add_argument("--sparsity", type=float, default=0.0)
@@ -621,8 +635,8 @@ for num, lambda_rate in enumerate(args.lambda_rate_list):
         )
 
         # Define total steps
-        total_steps = 10
-        total_steps_2 = 10
+        total_steps = 10000
+        total_steps_2 = 10000
         steps_til_summary = 10
 
         target_mask_flat = target_mask.flatten()
@@ -730,7 +744,8 @@ for num, lambda_rate in enumerate(args.lambda_rate_list):
             checkpoint_path=saved_path,
             decoded_image_path=decoded_path,
             metrics={
-                "swhdc": 1 if args.use_swhdc else 0,
+                "wsmse_tag": 1 if args.loss_type == "wsmse" else 0,
+                "swhdc_tag": 1 if args.use_swhdc else 0,
                 "psnr": out_psnr,
                 "loss_mse": loss_mse,
                 "mask_type": args.mask_type,
@@ -759,6 +774,11 @@ for num, lambda_rate in enumerate(args.lambda_rate_list):
         )
         logger.flush()  # ← grava no CSV após cada imagem
         # ─────────────────────────────────────────────────────────────────
+
+        # ---- Limpar cuda ----
+        del mask_model, dataloader, img_in
+        del target_mask, target_mask_flat, target_mask_tensor
+        torch.cuda.empty_cache()
 
         print(
             "Evaluate the image: PSNR:",

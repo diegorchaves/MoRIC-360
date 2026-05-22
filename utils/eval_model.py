@@ -203,7 +203,11 @@ def eval_model(target_mask, args, model, binary_mask, dataloader, img_index):
 
         bits_rate_eval = rate.sum() / (args.eval_pix_num)
         bits_rate_eval_num = rate.sum()
-        loss_mse = criterion(model_output, pixels)
+        if args.loss_type == "mse":
+            loss_mse = criterion(model_output, pixels)
+        elif args.loss_type == "wsmse":
+            loss_mse = ws_mse(model_output, pixels, height, width)
+
         loss_mse_o = criterion(model_output[:, target_mask, :], pixels1)
         loss_mse_b = criterion(model_output[:, ~target_mask, :], pixels2)
         psnr_eval = loss_to_psnr(loss_mse.item())
