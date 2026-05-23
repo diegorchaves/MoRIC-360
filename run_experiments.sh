@@ -12,13 +12,13 @@
 #   IMAGES_DIR=/outro/caminho bash run_experiments.sh
 # =============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
 # ── Configurações principais ─────────────────────────────────────────────────
 
 IMAGES_DIR="${IMAGES_DIR:-./ctc}"       # pasta com as imagens a treinar
-RESULTS_DIR="${RESULTS_DIR:-./results_ctc_3}"  # onde salvar CSVs e imagens decodificadas
-LOGS_DIR="${LOGS_DIR:-./logs_3}"           # onde salvar os .out de cada cenário
+RESULTS_DIR="${RESULTS_DIR:-./results_ctc_5080}"  # onde salvar CSVs e imagens decodificadas
+LOGS_DIR="${LOGS_DIR:-./logs_5080}"           # onde salvar os .out de cada cenário
 
 PYTHON="${PYTHON:-python}"
 
@@ -26,11 +26,11 @@ PYTHON="${PYTHON:-python}"
 
 # 1) Lambdas
 LAMBDAS=(
-    "1e-4"
-    "1.2e-3"
-    "2.3e-3"
-    "3.4e-3"
-    "4.5e-3"
+    #"1e-4"
+    #"1.2e-3"
+    #"2.3e-3"
+    #"3.4e-3"
+    #"4.5e-3"
     "5.6e-3"
     "6.7e-3"
     "7.8e-3"
@@ -81,14 +81,10 @@ echo "================================================================"
 # ── Loop principal ───────────────────────────────────────────────────────────
 
 for lambda in "${LAMBDAS[@]}"; do
-    sleep 5s
     for swhdc_entry in "${SWHDC_CONFIGS[@]}"; do
+        swhdc_label="${swhdc_entry%%|*}"
+        swhdc_args_str="${swhdc_entry##*|}"
 
-        sleep 5s
-        swhdc_label="${swhdc_entry%%|*}"          # tudo antes do "|"
-        swhdc_args_str="${swhdc_entry##*|}"        # tudo depois do "|"
-
-        # Converte string de args em array (lida com args vazios)
         if [[ -n "${swhdc_args_str}" ]]; then
             read -ra swhdc_args <<< "${swhdc_args_str}"
         else
@@ -96,9 +92,7 @@ for lambda in "${LAMBDAS[@]}"; do
         fi
 
         for loss_type in "${LOSS_TYPES[@]}"; do
-            sleep 5s
             for mask_type in "${MASK_TYPES[@]}"; do
-                sleep 5s
                 run=$(( run + 1 ))
                 tag="lambda${lambda}_${swhdc_label}_mask${mask_type}_loss${loss_type}"
                 log="${LOGS_DIR}/train_${tag}.out"
@@ -109,17 +103,29 @@ for lambda in "${LAMBDAS[@]}"; do
                 echo "  log → ${log}"
                 echo "────────────────────────────────────────────────────────"
 
+                # Pula se já foi concluído com sucesso
+                if [[ -f "${log}" ]] && grep -q "\[OK\] cenário" "${log}"; then
+                    echo "  [SKIP] cenário ${run}/${total} já concluído."
+                    continue
+                fi
+
                 $PYTHON -u train.py \
-                    "${BASE_ARGS[@]}"            \
+                    "${BASE_ARGS[@]}"              \
                     --lambda_rate_list "${lambda}" \
                     --mask_type        "${mask_type}" \
                     --run_tag          "${tag}"    \
                     --loss_type        "${loss_type}" \
-                    ${swhdc_args_str}            \
-                    > "${log}" 2>&1
+                    ${swhdc_args_str}              \
+                    > "${log}" 2>&1 || true
 
-                echo "  [OK] cenário ${run}/${total} concluído."
-                nvidia-smi --gpu-reset -i 0
+                # Unificado: verifica e grava no log
+                if grep -q "Traceback\|CUDA out of memory\|Killed" "${log}" 2>/dev/null; then
+                    echo "  [ERRO] cenário ${run}/${total} falhou — veja ${log}"
+                else
+                    echo "[OK] cenário ${run}/${total} concluído." | tee -a "${log}"
+                fi
+
+                nvidia-smi --gpu-reset -i 0 || true
             done
         done
     done

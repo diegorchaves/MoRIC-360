@@ -5,3 +5,5 @@ torchvision
 matplotlib
 scipy
 psutil
+einops
+scikit-image
