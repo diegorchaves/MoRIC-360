@@ -107,7 +107,7 @@ class NonAffineBatchNorm(nn.BatchNorm1d):
 
 
 # =============================================================================
-# SWHDC — Spherically-aware Weighted Horizontal Dilated Convolution
+# SWHDC
 # Substitui nn.Conv2d nos ramos net e global_net quando args.use_swhdc=True.
 # Aplica padding circular na horizontal e reflect na vertical internamente,
 # por isso SynthesisLayer deve desativar seu próprio padding ao usar SWHDC.
@@ -282,9 +282,9 @@ class ModConv(nn.Module):
 #
 # Quando use_swhdc=False o comportamento é idêntico ao original (kernel_size=1).
 # Quando use_swhdc=True  a primeira camada passa para kernel_size=3 com SWHDC,
-# que é onde a dilatação adaptativa por latitude agrega valor. As camadas
 # residuais seguintes continuam com kernel=1 e nn.Conv2d convencional.
 # =============================================================================
+
 class LocallyConnectedBlock(nn.Module):
     def __init__(
         self,
@@ -432,8 +432,7 @@ class LocalGlobalBlock(LocallyConnectedBlock):
             if id < 3:
                 device = out_full[id].device
                 self.mask = self.mask.to(device)
-                # Nota: squeeze() converte (1,1,H,W) → (H,W); verificar shape se
-                # batch_size > 1 ou se a máscara tiver dimensões diferentes.
+                
                 self.mask = self.mask.squeeze()
 
                 output_full_local = torch.where(
