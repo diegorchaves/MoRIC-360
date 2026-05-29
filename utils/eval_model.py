@@ -18,9 +18,8 @@ def weights(H, W, device):
     phis = torch.arange(H + 1, device=device) * torch.pi / H
     deltaTheta = 2 * torch.pi / W
 
-    column = deltaTheta * (torch.cos(phis[:-1]) - torch.cos(phis[1:]))  # Shape: (H,)
+    column = deltaTheta * (torch.cos(phis[:-1]) - torch.cos(phis[1:])) 
 
-    # Modifica o shape para (1, H, 1, 1) para que o PyTorch faça o broadcast automático para (B, H, W, C)
     w = column.view(1, H, 1, 1)
 
     return w
@@ -35,22 +34,22 @@ def ws_mse(img1, img2, H, W):
     B, _, C = img1.shape
     device = img1.device
 
-    # 1. Redimensiona de (B, H*W, 3) de volta para o formato 2D (B, H, W, 3)
+    Redimensiona de (B, H*W, 3) de volta para o formato 2D (B, H, W, 3)
     img1_2d = img1.view(B, H, W, C)
     img2_2d = img2.view(B, H, W, C)
 
     w = weights(H, W, device)
 
-    # 3. Calcula o erro quadrado ponderado pelos pesos esféricos
+    # Calcula o erro quadrado ponderado pelos pesos esféricos
     error = ((img1_2d - img2_2d) ** 2) * w
 
-    # 4. Replica a sua lógica original: média nos canais (C), soma na imagem (H, W)
+    # média nos canais (C), soma na imagem (H, W)
     wsmse = torch.mean(error, dim=-1)  # Média nos canais RGB -> (B, H, W)
     wsmse = torch.sum(wsmse, dim=(1, 2)) / (
         4 * torch.pi
     )  # Soma a imagem inteira -> (B,)
 
-    # Retorna a média do loss para o lote (batch) atual
+    # Retorna a média do loss batch atual
     return torch.mean(wsmse)
 
 
@@ -73,34 +72,32 @@ def ws_ssim(img1, img2, H, W, K1=0.01, K2=0.03, L=1.0):
     B, _, C = img1.shape
     device = img1.device
 
-    # 1. Redimensiona de (B, H*W, C) para o formato padrão do PyTorch (B, C, H, W)
+    # Redimensiona de (B, H*W, C) para o formato padrão do torch (B, C, H, W)
     img1_2d = img1.view(B, H, W, C).permute(0, 3, 1, 2)
     img2_2d = img2.view(B, H, W, C).permute(0, 3, 1, 2)
 
-    # 2. Configuração do Filtro Gaussiano (11x11, sigma=1.5)
+    # Filtro gaussiano
     k = 11
     sigma = 1.5
     pad = k // 2
 
-    # Cria a janela gaussiana diretamente no dispositivo (GPU)
+    # Cria a janela gaussiana na gpu
     coords = torch.arange(k, dtype=torch.float32, device=device) - pad
     grid_x, grid_y = torch.meshgrid(coords, coords, indexing="ij")
     window = torch.exp(-(grid_x**2 + grid_y**2) / (2.0 * sigma**2))
     window = (window / window.sum()).view(1, 1, k, k).expand(C, 1, k, k)
 
-    # 3. Otimização dos Pesos Esféricos Válidos
-    # A convolução 'valid' remove as bordas (pad). Conseguimos o mesmo efeito fatiando o peso original.
+
     w_base = weights(H, W, device)  # Shape: (1, H, 1, 1)
     W_2d = w_base.view(H, 1).expand(H, W)
     Wi = W_2d[
         pad:-pad, pad:-pad
-    ]  # Recorta as bordas para alinhar com o resultado da convolução
+    ]
     weight_sum = Wi.sum()
 
     C1 = (K1 * L) ** 2
     C2 = (K2 * L) ** 2
 
-    # 4. Convoluções Vetorizadas (groups=C aplica o filtro por canal individualmente para todo o batch)
     mu1 = F.conv2d(img1_2d, window, groups=C)
     mu2 = F.conv2d(img2_2d, window, groups=C)
 
@@ -112,19 +109,16 @@ def ws_ssim(img1, img2, H, W, K1=0.01, K2=0.03, L=1.0):
     sigma2_sq = F.conv2d(img2_2d * img2_2d, window, groups=C) - mu2_sq
     sigma12 = F.conv2d(img1_2d * img2_2d, window, groups=C) - mu1_mu2
 
-    # 5. Cálculo do Mapa SSIM estrutural
     numerator = (2 * mu1_mu2 + C1) * (2 * sigma12 + C2)
     denominator = (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
     ssim_map = numerator / denominator
 
-    # 6. Aplicação dos Pesos Esféricos
+    # Aplicação dos pesos esféricos
     Wi_expanded = Wi.view(1, 1, Wi.shape[0], Wi.shape[1])
     weighted_ssim = ssim_map * Wi_expanded
 
-    # Média ponderada espacial por canal -> Shape: (B, C)
     ssim_per_channel = torch.sum(weighted_ssim, dim=(2, 3)) / weight_sum
 
-    # Retorna a média entre canais e entre o lote (batch) como um escalar
     return torch.mean(ssim_per_channel)
 
 
